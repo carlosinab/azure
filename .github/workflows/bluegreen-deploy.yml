@@ -1,3 +1,52 @@
+name: Blue-Green Deployment
+
+on:
+  push:
+    branches: [main, v1, v2]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy'
+        required: true
+        default: 'v1'
+        type: choice
+        options: [v1, v2]
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy-to-staging'
+        type: choice
+        options: [deploy-to-staging, swap-production, rollback]
+
+permissions:
+  contents: read
+
+env:
+  AZURE_RG: rg-azurelab-sysres
+  APP_NAME: app-azurelab-sysres
+  SLOT_NAME: staging
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine Version
+        id: version
+        run: |
+          if [ "${{ github.event.inputs.version }}" != "" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == *"v1"* ]]; then
+            echo "version=v1" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == *"v2"* ]]; then
+            echo "version=v2" >> $GITHUB_OUTPUT
+          else
+            echo "version=v1" >> $GITHUB_OUTPUT
+          fi
+
       - name: Prepare App Package
         run: |
           mkdir -p deploy
@@ -28,3 +77,48 @@
 EOF
           
           cd deploy && zip -r ../app.zip . && cd ..
+
+      - name: Deploy to Staging Slot
+        if: github.event.inputs.action != 'rollback'
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.APP_NAME }}
+          slot-name: ${{ env.SLOT_NAME }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_STAGING }}
+          package: app.zip
+
+      - name: Verify Staging Deployment
+        if: github.event.inputs.action != 'rollback'
+        run: |
+          STAGING_URL="https://${{ env.APP_NAME }}-${{ env.SLOT_NAME }}.azurewebsites.net"
+          echo "Checking staging: $STAGING_URL"
+          sleep 15
+          RESPONSE=$(curl -s $STAGING_URL)
+          echo "Response: $RESPONSE"
+          echo "$RESPONSE" | grep -i "hello world" || exit 1
+
+      - name: Swap to Production
+        if: github.event.inputs.action == 'swap-production'
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.APP_NAME }}
+          slot-name: production
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PRODUCTION }}
+          package: app.zip
+
+      - name: Rollback Production
+        if: github.event.inputs.action == 'rollback'
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.APP_NAME }}
+          slot-name: production
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_PRODUCTION }}
+          package: app.zip
+
+      - name: Verify Production
+        if: github.event.inputs.action == 'swap-production' || github.event.inputs.action == 'rollback'
+        run: |
+          PROD_URL="https://${{ env.APP_NAME }}.azurewebsites.net"
+          echo "Checking production: $PROD_URL"
+          sleep 10
+          curl -s $PROD_URL | grep -i "hello world" || exit 1
