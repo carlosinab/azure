@@ -5,7 +5,7 @@ $tenantId = az account show --query tenantId -o tsv
 Write-Host "Tenant ID: $tenantId"
 
 # === STEP 2: Create Identity ===
-$identityJson = az identity create --name "bg-hello-world-github-oidc" --resource-group "rg-azurelab-sysres" --location "switzerlandnorth" -o json
+$identityJson = az identity create --name "app-azurelab-sysres-github-oidc" --resource-group "rg-azurelab-sysres" --location "switzerlandnorth" -o json
 $identity = $identityJson | ConvertFrom-Json
 $clientId = $identity.clientId
 $principalId = $identity.principalId
