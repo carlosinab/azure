@@ -1,0 +1,134 @@
+name: Blue-Green Deployment
+
+on:
+  push:
+    branches: [main, v1, v2, "release/*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy (v1 or v2)'
+        required: true
+        default: 'v1'
+        type: choice
+        options:
+          - v1
+          - v2
+      action:
+        description: 'Deploy action'
+        required: true
+        default: 'deploy-to-staging'
+        type: choice
+        options:
+          - deploy-to-staging
+          - swap-production
+          - rollback
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_RG: rg-azurelab-sysres
+  APP_NAME: bg-hello-world-app
+  SLOT_NAME: staging
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Login to Azure using OIDC
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Determine version
+      - name: Determine Version
+        id: version
+        run: |
+          if [ "${{ github.event.inputs.version }}" != "" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == *"v1"* ]]; then
+            echo "version=v1" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == *"v2"* ]]; then
+            echo "version=v2" >> $GITHUB_OUTPUT
+          else
+            echo "version=v1" >> $GITHUB_OUTPUT
+          fi
+
+      # Prepare app package
+      - name: Prepare App Package
+        run: |
+          mkdir -p deploy
+          if [ "${{ steps.version.outputs.version }}" == "v1" ]; then
+            cp app/index.html deploy/index.html
+          else
+            cp app/index-v2.html deploy/index.html
+          fi
+          cd deploy && zip -r ../app.zip . && cd ..
+
+      # Deploy to Staging Slot (Green/Blue)
+      - name: Deploy to Staging Slot
+        if: github.event.inputs.action != 'rollback'
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.APP_NAME }}
+          slot-name: ${{ env.SLOT_SLOT }}
+          package: app.zip
+
+      # Verify Staging
+      - name: Verify Staging Deployment
+        if: github.event.inputs.action != 'rollback'
+        run: |
+          STAGING_URL=$(az webapp deployment slot list \
+            --resource-group ${{ env.AZURE_RG }} \
+            --name ${{ env.APP_NAME }} \
+            --query "[?name=='${{ env.SLOT_NAME }}'].defaultHostName" -o tsv)
+          
+          echo "Waiting for deployment to warm up..."
+          sleep 10
+          
+          curl -s "https://$STAGING_URL" | grep -i "hello world" || exit 1
+          echo "Staging verification passed!"
+
+      # Swap Slots (Blue/Green)
+      - name: Swap to Production
+        if: github.event.inputs.action == 'swap-production'
+        run: |
+          az webapp deployment slot swap \
+            --resource-group ${{ env.AZURE_RG }} \
+            --name ${{ env.APP_NAME }} \
+            --slot ${{ env.SLOT_NAME }} \
+            --target-slot production
+
+      # Rollback (Swap back)
+      - name: Rollback Production
+        if: github.event.inputs.action == 'rollback'
+        run: |
+          echo "Rolling back to previous version..."
+          az webapp deployment slot swap \
+            --resource-group ${{ env.AZURE_RG }} \
+            --name ${{ env.APP_NAME }} \
+            --slot production \
+            --target-slot ${{ env.SLOT_NAME }}
+
+      # Verify Production
+      - name: Verify Production
+        if: github.event.inputs.action == 'swap-production' || github.event.inputs.action == 'rollback'
+        run: |
+          PROD_URL=$(az webapp show \
+            --resource-group ${{ env.AZURE_RG }} \
+            --name ${{ env.APP_NAME }} \
+            --query defaultHostName -o tsv)
+          
+          sleep 5
+          curl -s "https://$PROD_URL" || exit 1
+          echo "Production verified!"
