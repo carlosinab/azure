@@ -52,30 +52,10 @@ jobs:
           mkdir -p deploy
           if [ "${{ steps.version.outputs.version }}" == "v1" ]; then
             cp app/index.html deploy/index.html
-            echo "Deploying VERSION 1 (Blue)"
           else
             cp app/index-v2.html deploy/index.html
-            echo "Deploying VERSION 2 (Green)"
           fi
-          
-          # Add web.config to serve index.html as default document
-          cat > deploy/web.config << 'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<configuration>
-  <system.webServer>
-    <defaultDocument>
-      <files>
-        <clear />
-        <add value="index.html" />
-      </files>
-    </defaultDocument>
-    <staticContent>
-      <mimeMap fileExtension=".html" mimeType="text/html" />
-    </staticContent>
-  </system.webServer>
-</configuration>
-EOF
-          
+          cp app/web.config deploy/web.config
           cd deploy && zip -r ../app.zip . && cd ..
 
       - name: Deploy to Staging Slot
